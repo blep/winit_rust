@@ -26,3 +26,8 @@ fn custom_cursor_sync() {
     needs_sync::<winit::window::CustomCursorSource>();
     needs_sync::<winit::window::CustomCursor>();
 }
+
+#[test]
+fn pen_event_sync() {
+    needs_sync::<winit::event::PenEvent>();
+}

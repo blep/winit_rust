@@ -34,3 +34,8 @@ fn custom_cursor_send() {
     needs_send::<winit::window::CustomCursorSource>();
     needs_send::<winit::window::CustomCursor>();
 }
+
+#[test]
+fn pen_event_send() {
+    needs_send::<winit::event::PenEvent>();
+}

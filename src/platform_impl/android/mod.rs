@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use android_activity::input::{InputEvent, KeyAction, Keycode, MotionAction};
+use android_activity::input::{Axis, InputEvent, KeyAction, Keycode, MotionAction};
 use android_activity::{
     AndroidApp, AndroidAppWaker, ConfigurationRef, InputStatus, MainEvent, Rect,
 };
@@ -377,23 +377,78 @@ impl<T: 'static> EventLoop<T> {
                 let window_id = window::WindowId(WindowId);
                 let device_id = event::DeviceId(DeviceId(motion_event.device_id()));
 
-                let phase = match motion_event.action() {
+                let action = motion_event.action();
+                let phase = match action {
                     MotionAction::Down | MotionAction::PointerDown => {
                         Some(event::TouchPhase::Started)
                     },
                     MotionAction::Up | MotionAction::PointerUp => Some(event::TouchPhase::Ended),
                     MotionAction::Move => Some(event::TouchPhase::Moved),
                     MotionAction::Cancel => Some(event::TouchPhase::Cancelled),
-                    _ => {
-                        None // TODO mouse events
-                    },
+                    MotionAction::HoverMove => Some(event::TouchPhase::Moved),
+                    MotionAction::HoverEnter => Some(event::TouchPhase::Moved),
+                    MotionAction::HoverExit => Some(event::TouchPhase::Ended),
+                    MotionAction::ButtonPress => Some(event::TouchPhase::Moved),
+                    MotionAction::ButtonRelease => Some(event::TouchPhase::Moved),
+                    _ => None,
                 };
                 if let Some(phase) = phase {
-                    let pointers: Box<dyn Iterator<Item = android_activity::input::Pointer<'_>>> =
-                        match phase {
+                    let is_hover = matches!(
+                        action,
+                        MotionAction::HoverMove
+                            | MotionAction::HoverEnter
+                            | MotionAction::HoverExit
+                            | MotionAction::ButtonPress
+                            | MotionAction::ButtonRelease
+                    );
+
+                    if is_hover {
+                        let pointer =
+                            motion_event.pointer_at_index(motion_event.pointer_index());
+                        let tool_type = pointer.tool_type();
+                        if matches!(
+                            tool_type,
+                            android_activity::input::ToolType::Stylus
+                                | android_activity::input::ToolType::Eraser
+                        ) {
+                            let location = PhysicalPosition {
+                                x: pointer.x() as _,
+                                y: pointer.y() as _,
+                            };
+                            let tilt_angle = pointer.axis_value(Axis::Tilt) as f64;
+                            let orientation = pointer.orientation() as f64;
+                            let tilt_x = tilt_angle * orientation.sin();
+                            let tilt_y = tilt_angle * orientation.cos();
+
+                            let event = event::Event::WindowEvent {
+                                window_id,
+                                event: event::WindowEvent::Pen(event::PenEvent {
+                                    device_id,
+                                    phase,
+                                    location,
+                                    force: None,
+                                    id: pointer.pointer_id() as u64,
+                                    tilt_x: Some(tilt_x),
+                                    tilt_y: Some(tilt_y),
+                                    orientation: Some(orientation),
+                                    hover_distance: Some(
+                                        pointer.axis_value(Axis::Distance) as f64,
+                                    ),
+                                    tool_type: Some(map_tool_type(tool_type)),
+                                    button_state: Some(motion_event.button_state().0),
+                                }),
+                            };
+                            callback(event, self.window_target());
+                        }
+                    } else {
+                        let pointers: Box<
+                            dyn Iterator<Item = android_activity::input::Pointer<'_>>,
+                        > = match phase {
                             event::TouchPhase::Started | event::TouchPhase::Ended => {
                                 Box::new(std::iter::once(
-                                    motion_event.pointer_at_index(motion_event.pointer_index()),
+                                    motion_event.pointer_at_index(
+                                        motion_event.pointer_index(),
+                                    ),
                                 ))
                             },
                             event::TouchPhase::Moved | event::TouchPhase::Cancelled => {
@@ -401,24 +456,70 @@ impl<T: 'static> EventLoop<T> {
                             },
                         };
 
-                    for pointer in pointers {
-                        let location =
-                            PhysicalPosition { x: pointer.x() as _, y: pointer.y() as _ };
-                        trace!(
-                            "Input event {device_id:?}, {phase:?}, loc={location:?}, \
-                             pointer={pointer:?}"
-                        );
-                        let event = event::Event::WindowEvent {
-                            window_id,
-                            event: event::WindowEvent::Touch(event::Touch {
-                                device_id,
-                                phase,
-                                location,
-                                id: pointer.pointer_id() as u64,
-                                force: Some(Force::Normalized(pointer.pressure() as f64)),
-                            }),
-                        };
-                        callback(event, self.window_target());
+                        for pointer in pointers {
+                            let location = PhysicalPosition {
+                                x: pointer.x() as _,
+                                y: pointer.y() as _,
+                            };
+                            trace!(
+                                "Input event {device_id:?}, {phase:?}, loc={location:?}, \
+                                 pointer={pointer:?}"
+                            );
+
+                            let tool_type = pointer.tool_type();
+                            if matches!(
+                                tool_type,
+                                android_activity::input::ToolType::Stylus
+                                    | android_activity::input::ToolType::Eraser
+                            ) {
+                                let tilt_angle =
+                                    pointer.axis_value(Axis::Tilt) as f64;
+                                let orientation = pointer.orientation() as f64;
+                                let tilt_x = tilt_angle * orientation.sin();
+                                let tilt_y = tilt_angle * orientation.cos();
+
+                                let event = event::Event::WindowEvent {
+                                    window_id,
+                                    event: event::WindowEvent::Pen(
+                                        event::PenEvent {
+                                            device_id,
+                                            phase,
+                                            location,
+                                            force: Some(Force::Normalized(
+                                                pointer.pressure() as f64,
+                                            )),
+                                            id: pointer.pointer_id() as u64,
+                                            tilt_x: Some(tilt_x),
+                                            tilt_y: Some(tilt_y),
+                                            orientation: Some(orientation),
+                                            hover_distance: Some(
+                                                pointer.axis_value(Axis::Distance)
+                                                    as f64,
+                                            ),
+                                            tool_type: Some(map_tool_type(tool_type)),
+                                            button_state: Some(
+                                                motion_event.button_state().0,
+                                            ),
+                                        },
+                                    ),
+                                };
+                                callback(event, self.window_target());
+                            } else {
+                                let event = event::Event::WindowEvent {
+                                    window_id,
+                                    event: event::WindowEvent::Touch(event::Touch {
+                                        device_id,
+                                        phase,
+                                        location,
+                                        id: pointer.pointer_id() as u64,
+                                        force: Some(Force::Normalized(
+                                            pointer.pressure() as f64,
+                                        )),
+                                    }),
+                                };
+                                callback(event, self.window_target());
+                            }
+                        }
                     }
                 }
             },
@@ -627,6 +728,19 @@ impl<T: 'static> EventLoop<T> {
 
     fn exiting(&self) -> bool {
         self.window_target.p.exiting()
+    }
+}
+
+fn map_tool_type(tool_type: android_activity::input::ToolType) -> event::PenToolType {
+    use android_activity::input::ToolType;
+    match tool_type {
+        ToolType::Stylus => event::PenToolType::Pen,
+        ToolType::Eraser => event::PenToolType::Eraser,
+        ToolType::Finger => event::PenToolType::Finger,
+        ToolType::Mouse => event::PenToolType::Mouse,
+        ToolType::Palm => event::PenToolType::Palm,
+        ToolType::Unknown => event::PenToolType::Unknown,
+        _ => event::PenToolType::Unknown,
     }
 }
 

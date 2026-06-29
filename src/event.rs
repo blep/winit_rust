@@ -364,6 +364,18 @@ pub enum WindowEvent {
     /// [`transform`]: https://developer.mozilla.org/en-US/docs/Web/CSS/transform
     Touch(Touch),
 
+    /// Pen/stylus event has been received
+    ///
+    /// Emitted for stylus and eraser input when the platform can distinguish
+    /// them from fingers. Mutually exclusive with `Touch`.
+    ///
+    /// ## Platform-specific
+    ///
+    /// - **macOS:** Unsupported for now.
+    /// - **iOS:** Unsupported for now.
+    /// - **Web:** Unsupported for now.
+    Pen(PenEvent),
+
     /// The window's scale factor has changed.
     ///
     /// The following user actions can cause DPI changes:
@@ -856,6 +868,41 @@ pub struct Touch {
     pub id: u64,
 }
 
+/// Stylus / pen event carrying full axis data.
+///
+/// Emitted for stylus and eraser input when the platform can distinguish
+/// them from fingers. Mutually exclusive with `Touch` — a given physical
+/// pointer produces either `Pen` or `Touch` events, never both.
+///
+/// Fields that overlap with `Touch` use identical names and types for
+/// consistency (`device_id`, `location`, `force`, `phase`, `id`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PenEvent {
+    pub device_id: DeviceId,
+    pub phase: TouchPhase,
+    pub location: PhysicalPosition<f64>,
+    /// Pressure, using the same `Force` convention as `Touch.force`.
+    pub force: Option<Force>,
+    /// Tilt from vertical in radians, decomposed into X and Y.
+    /// 0 = perpendicular to screen, π/2 = flat on the surface.
+    /// Range [-π/2, π/2]. `None` if the device does not support tilt.
+    pub tilt_x: Option<f64>,
+    pub tilt_y: Option<f64>,
+    /// Orientation (azimuth) in radians, direction of the stylus on the
+    /// screen plane. Range [-π, π]. `None` if unsupported.
+    pub orientation: Option<f64>,
+    /// Hover distance (≥ 0). The unit is platform-dependent.
+    /// `None` if the device does not support proximity detection.
+    pub hover_distance: Option<f64>,
+    /// The type of tool generating the input.
+    pub tool_type: Option<PenToolType>,
+    /// Raw platform button-state bitmask.
+    /// See `PenToolType` for known button constants.
+    pub button_state: Option<u32>,
+    /// Unique identifier of this pointer (same lifetime as `Touch.id`).
+    pub id: u64,
+}
+
 /// Describes the force of a touch event
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Force {
@@ -914,6 +961,23 @@ pub type AxisId = u32;
 
 /// Identifier for a specific button on some device.
 pub type ButtonId = u32;
+
+/// The type of a stylus or pen tool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PenToolType {
+    /// The tool is a general-purpose stylus or pen.
+    Pen,
+    /// The tool is an eraser end.
+    Eraser,
+    /// The tool is a finger.
+    Finger,
+    /// The tool is a mouse.
+    Mouse,
+    /// The tool is a palm.
+    Palm,
+    /// The tool type is unknown.
+    Unknown,
+}
 
 /// Describes the input state of a key.
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
@@ -1085,6 +1149,19 @@ mod tests {
                     location: (0.0, 0.0).into(),
                     id: 0,
                     force: Some(event::Force::Normalized(0.0)),
+                }));
+                with_window_event(Pen(event::PenEvent {
+                    device_id: did,
+                    phase: event::TouchPhase::Started,
+                    location: (0.0, 0.0).into(),
+                    force: Some(event::Force::Normalized(0.0)),
+                    id: 0,
+                    tilt_x: None,
+                    tilt_y: None,
+                    orientation: None,
+                    hover_distance: None,
+                    tool_type: Some(event::PenToolType::Pen),
+                    button_state: None,
                 }));
                 with_window_event(ThemeChanged(crate::window::Theme::Light));
                 with_window_event(Occluded(true));
