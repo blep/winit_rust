@@ -29,7 +29,10 @@ use crate::platform_impl::wayland::{DeviceId, WindowId};
 #[derive(Debug, Default)]
 struct ToolFrame {
     in_proximity: bool,
+    /// Whether the tip is touching the surface (updated on `down`/`up`).
     touching: bool,
+    /// Phase transition set by `down`/`up` and consumed by `frame`.
+    pending_phase: Option<TouchPhase>,
     surface: Option<WlSurface>,
     position: Option<(f64, f64)>,
     pressure: Option<u32>,
@@ -169,8 +172,9 @@ impl Dispatch<ZwpTabletToolV2, GlobalData, WinitState> for TabletState {
         _conn: &Connection,
         _qhandle: &QueueHandle<WinitState>,
     ) {
-        // ── Phase 1: Update tool state, extract surface for emits ──
+        // ── Phase 1: Update tool state, extract surface and phase for emits ──
         let mut emit_surface: Option<WlSurface> = None;
+        let mut emit_phase: Option<TouchPhase> = None;
 
         {
             let tablet_state = match state.tablet_state.as_mut() {
@@ -213,10 +217,16 @@ impl Dispatch<ZwpTabletToolV2, GlobalData, WinitState> for TabletState {
                     tool.frame.removed = false;
                 },
                 zwp_tablet_tool_v2::Event::Down { .. } => {
-                    tool.frame.touching = true;
+                    if !tool.frame.touching {
+                        tool.frame.touching = true;
+                        tool.frame.pending_phase = Some(TouchPhase::Started);
+                    }
                 },
                 zwp_tablet_tool_v2::Event::Up => {
-                    tool.frame.touching = false;
+                    if tool.frame.touching {
+                        tool.frame.touching = false;
+                        tool.frame.pending_phase = Some(TouchPhase::Ended);
+                    }
                 },
                 zwp_tablet_tool_v2::Event::Motion { x, y } => {
                     tool.frame.position = Some((x, y));
@@ -243,6 +253,7 @@ impl Dispatch<ZwpTabletToolV2, GlobalData, WinitState> for TabletState {
                 },
                 zwp_tablet_tool_v2::Event::Frame { .. } => {
                     emit_surface = tool.frame.surface.clone();
+                    emit_phase = tool.frame.pending_phase.take();
                 },
                 zwp_tablet_tool_v2::Event::Removed => {
                     tool.frame.removed = true;
@@ -270,10 +281,13 @@ impl Dispatch<ZwpTabletToolV2, GlobalData, WinitState> for TabletState {
                 .map(|w| w.scale_factor())
                 .unwrap_or(1.0);
             let location = PhysicalPosition::new(lx * scale, ly * scale);
-            let phase = if f.removed { TouchPhase::Ended }
-                else if f.touching { TouchPhase::Moved }
-                else if f.in_proximity { TouchPhase::Moved }
-                else { TouchPhase::Ended };
+            // Phase determined in Phase 1 from pen tip transitions:
+            // Started on touch down, Ended on lift, Moved otherwise.
+            let phase = if f.removed {
+                TouchPhase::Ended
+            } else {
+                emit_phase.unwrap_or(TouchPhase::Moved)
+            };
             let force = match (f.touching, f.pressure) {
                 (true, Some(p)) if p > 0 => Some(Force::Normalized(p as f64 / 65535.0)),
                 (true, _) => Some(Force::Normalized(0.0)),
