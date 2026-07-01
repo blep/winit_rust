@@ -261,7 +261,15 @@ impl Dispatch<ZwpTabletToolV2, GlobalData, WinitState> for TabletState {
                 .seats.values().next()?
                 .tools.get(&proxy.id())?;
             let f = &tool.frame;
-            let location = PhysicalPosition::new(f.position?.0, f.position?.1);
+            // Surface-local (logical) coords → physical pixels
+            // by multiplying with the window's scale factor,
+            // matching how the wl_pointer handler converts.
+            let (lx, ly) = f.position?;
+            let scale = state.windows.borrow().get(&window_id)
+                .and_then(|w| w.lock().ok())
+                .map(|w| w.scale_factor())
+                .unwrap_or(1.0);
+            let location = PhysicalPosition::new(lx * scale, ly * scale);
             let phase = if f.removed { TouchPhase::Ended }
                 else if f.touching { TouchPhase::Moved }
                 else if f.in_proximity { TouchPhase::Moved }
