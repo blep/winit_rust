@@ -271,8 +271,21 @@ impl Dispatch<ZwpTabletToolV2, GlobalData, WinitState> for TabletState {
                 (true, _) => Some(Force::Normalized(0.0)),
                 (false, _) => None,
             };
-            let tilt_x = f.tilt.map(|(tx, _)| tx.to_radians());
+            // Negate tilt_x to match Android convention (positive = right)
+            let tilt_x = f.tilt.map(|(tx, _)| (-tx).to_radians());
             let tilt_y = f.tilt.map(|(_, ty)| ty.to_radians());
+            // Orientation (azimuth) is the direction of the tilt vector
+            // on the screen plane, always derived from tilt_x/tilt_y.
+            // (The protocol's `rotation` event is barrel twist, not azimuth.)
+            let orientation = match (tilt_x, tilt_y) {
+                (Some(tx), Some(ty)) => Some(f64::atan2(tx, ty)),
+                _ => None,
+            };
+            // hover_distance: 0.0 = at surface (touching), 1.0 = hovering,
+            // None = no pen in proximity. Matches Android convention.
+            let hover_distance = f.distance
+                .map(|d| d as f64 / 65535.0)
+                .or_else(|| if force.is_some() { Some(0.0) } else { Some(1.0) });
             let pen = PenEvent {
                 device_id: crate::event::DeviceId(
                     crate::platform_impl::DeviceId::Wayland(DeviceId),
@@ -282,8 +295,8 @@ impl Dispatch<ZwpTabletToolV2, GlobalData, WinitState> for TabletState {
                 force,
                 tilt_x,
                 tilt_y,
-                orientation: f.rotation.map(|r| r.to_radians()),
-                hover_distance: f.distance.map(|d| d as f64 / 65535.0),
+                orientation,
+                hover_distance,
                 tool_type: Some(tool.tool_type),
                 button_state: Some(f.buttons),
                 id: tool.serial,

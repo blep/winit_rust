@@ -1095,15 +1095,24 @@ impl EventProcessor {
                     let pressure = self.extract_pen_pressure(event, device);
 
                     let location = PhysicalPosition::new(event.event_x, event.event_y);
+                    // Negate tilt_x to match Android convention (positive = right)
+                    let tilt_x = self.extract_pen_tilt_x(event, device).map(|v| -(v as f64));
+                    let tilt_y = self.extract_pen_tilt_y(event, device).map(|v| v as f64);
+                    let orientation = match (tilt_x, tilt_y) {
+                        (Some(tx), Some(ty)) => Some(f64::atan2(tx, ty)),
+                        _ => None,
+                    };
+                    let force = pressure.map(|p| Force::Normalized(p as f64));
+                    let hover_distance = if force.is_some() { Some(0.0) } else { Some(1.0) };
                     let pen_event = PenEvent {
                         device_id: mkdid(event.deviceid as xinput::DeviceId),
                         phase,
                         location,
-                        force: pressure.map(|p| Force::Normalized(p as f64)),
-                        tilt_x: self.extract_pen_tilt_x(event, device).map(|v| v as f64),
-                        tilt_y: self.extract_pen_tilt_y(event, device).map(|v| v as f64),
-                        orientation: None,
-                        hover_distance: None,
+                        force,
+                        tilt_x,
+                        tilt_y,
+                        orientation,
+                        hover_distance,
                         tool_type: Some(if device.is_eraser {
                             PenToolType::Eraser
                         } else {
@@ -1292,15 +1301,24 @@ impl EventProcessor {
         let tilt_x = self.extract_pen_tilt_x(event, device);
         let tilt_y = self.extract_pen_tilt_y(event, device);
 
+        // Negate tilt_x to match Android convention (positive = right)
+        let tilt_x_f64 = tilt_x.map(|v| -(v as f64));
+        let tilt_y_f64 = tilt_y.map(|v| v as f64);
+        let force = pressure.map(|p| Force::Normalized(p as f64));
+        let orientation = match (tilt_x_f64, tilt_y_f64) {
+            (Some(tx), Some(ty)) => Some(f64::atan2(tx, ty)),
+            _ => None,
+        };
+        let hover_distance = if force.is_some() { Some(0.0) } else { Some(1.0) };
         let pen_event = PenEvent {
             device_id: mkdid(event.deviceid as xinput::DeviceId),
             phase,
             location,
-            force: pressure.map(|p| Force::Normalized(p as f64)),
-            tilt_x: tilt_x.map(|v| v as f64),
-            tilt_y: tilt_y.map(|v| v as f64),
-            orientation: None,
-            hover_distance: None,
+            force,
+            tilt_x: tilt_x_f64,
+            tilt_y: tilt_y_f64,
+            orientation,
+            hover_distance,
             tool_type: Some(if device.is_eraser {
                 PenToolType::Eraser
             } else {

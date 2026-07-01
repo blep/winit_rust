@@ -63,8 +63,7 @@ const ALL_DEVICES: u16 = 0;
 const ALL_MASTER_DEVICES: u16 = 1;
 const ICONIC_STATE: u32 = 3;
 
-// Pen/stylus class type (XInput 2.4+), not yet in x11-dl.
-const XI_PEN_CLASS: i32 = 10;
+
 
 /// The underlying x11rb connection that we are using.
 type X11rbConnection = x11rb::xcb_ffi::XCBConnection;
@@ -991,8 +990,6 @@ pub struct Device {
     tilt_x_axis: i32,
     /// Axis number for tilt_y, or -1 if unknown.
     tilt_y_axis: i32,
-    /// Axis number for azimuth/orientation, or -1 if unknown.
-    orientation_axis: i32,
     /// Currently pressed buttons (XInput2 button number bits).
     buttons_pressed: u32,
     /// Unique pen pointer ID (0 if not a pen).
@@ -1021,7 +1018,6 @@ impl Device {
         let mut pressure_axis = -1;
         let mut tilt_x_axis = -1;
         let mut tilt_y_axis = -1;
-        let orientation_axis = -1;
 
         if Device::physical_device(info) {
             // Identify scroll axes and pen axes
@@ -1101,7 +1097,6 @@ impl Device {
             pressure_axis,
             tilt_x_axis,
             tilt_y_axis,
-            orientation_axis,
             buttons_pressed: 0,
             pen_id,
         };
