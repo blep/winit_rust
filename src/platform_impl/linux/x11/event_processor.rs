@@ -5,8 +5,8 @@ use std::slice;
 use std::sync::{Arc, Mutex};
 
 use x11_dl::xinput2::{
-    self, XIDeviceEvent, XIEnterEvent, XIFocusInEvent, XIFocusOutEvent, XIHierarchyEvent,
-    XILeaveEvent, XIModifierState, XIRawEvent,
+    self, XIDeviceChangedEvent, XIDeviceEvent, XIEnterEvent, XIFocusInEvent, XIFocusOutEvent,
+    XIHierarchyEvent, XILeaveEvent, XIModifierState, XIRawEvent,
 };
 use x11_dl::xlib::{
     self, Display as XDisplay, Window as XWindow, XAnyEvent, XClientMessageEvent, XConfigureEvent,
@@ -21,8 +21,8 @@ use xkbcommon_dl::xkb_mod_mask_t;
 
 use crate::dpi::{PhysicalPosition, PhysicalSize};
 use crate::event::{
-    DeviceEvent, ElementState, Event, Ime, InnerSizeWriter, MouseButton, MouseScrollDelta,
-    RawKeyEvent, Touch, TouchPhase, WindowEvent,
+    DeviceEvent, ElementState, Event, Force, Ime, InnerSizeWriter, MouseButton, MouseScrollDelta,
+    PenEvent, PenToolType, RawKeyEvent, Touch, TouchPhase, WindowEvent,
 };
 use crate::event_loop::ActiveEventLoop as RootAEL;
 use crate::keyboard::ModifiersState;
@@ -302,6 +302,10 @@ impl EventProcessor {
                     xinput2::XI_HierarchyChanged => {
                         let xev: &XIHierarchyEvent = unsafe { xev.as_event() };
                         self.xinput2_hierarchy_changed(xev, &mut callback);
+                    },
+                    xinput2::XI_DeviceChanged => {
+                        let xev: &XIDeviceChangedEvent = unsafe { xev.as_event() };
+                        self.xinput2_device_changed(xev, &mut callback);
                     },
                     _ => {},
                 }
@@ -1064,6 +1068,70 @@ impl EventProcessor {
             return;
         }
 
+        // Check if the source device is a pen.
+        {
+            let source_id = DeviceId(event.sourceid as xinput::DeviceId);
+            let mut devices = self.devices.borrow_mut();
+            if let Some(device) = devices.get_mut(&source_id) {
+                if device.is_pen {
+                    let pressed = state == ElementState::Pressed;
+                    let detail = event.detail as u32;
+
+                    // Update button state
+                    if pressed {
+                        device.buttons_pressed |= 1 << detail;
+                    } else {
+                        device.buttons_pressed &= !(1 << detail);
+                    }
+
+                    let pen_id = device.pen_id;
+
+                    let phase = match (detail, pressed) {
+                        (1, true) => TouchPhase::Started,
+                        (1, false) => TouchPhase::Ended,
+                        _ => TouchPhase::Moved,
+                    };
+
+                    let pressure = self.extract_pen_pressure(event, device);
+
+                    let location = PhysicalPosition::new(event.event_x, event.event_y);
+                    let pen_event = PenEvent {
+                        device_id: mkdid(event.deviceid as xinput::DeviceId),
+                        phase,
+                        location,
+                        force: pressure.map(|p| Force::Normalized(p as f64)),
+                        tilt_x: self.extract_pen_tilt_x(event, device).map(|v| v as f64),
+                        tilt_y: self.extract_pen_tilt_y(event, device).map(|v| v as f64),
+                        orientation: None,
+                        hover_distance: None,
+                        tool_type: Some(if device.is_eraser {
+                            PenToolType::Eraser
+                        } else {
+                            PenToolType::Pen
+                        }),
+                        button_state: Some(device.buttons_pressed),
+                        id: pen_id,
+                    };
+                    drop(devices);
+                    let window_event = Event::WindowEvent {
+                        window_id,
+                        event: WindowEvent::Pen(pen_event),
+                    };
+                    let xp_window = event.event as xproto::Window;
+                    let cursor_x = event.event_x;
+                    let cursor_y = event.event_y;
+                    callback(&self.target, window_event);
+
+                    // Update cursor position
+                    self.with_window(xp_window, |w| {
+                        let mut s = w.shared_state_lock();
+                        s.cursor_pos = Some((cursor_x, cursor_y));
+                    });
+                    return;
+                }
+            }
+        }
+
         let event = match event.detail as u32 {
             xlib::Button1 => {
                 WindowEvent::MouseInput { device_id, state, button: MouseButton::Left }
@@ -1114,6 +1182,21 @@ impl EventProcessor {
         let window = event.event as xproto::Window;
         let window_id = mkwid(window);
         let new_cursor_pos = (event.event_x, event.event_y);
+
+        // Check if source device is a pen.
+        let is_pen = self.devices.borrow().get(
+            &DeviceId(event.sourceid as xinput::DeviceId)
+        ).map(|d| d.is_pen).unwrap_or(false);
+
+        if is_pen {
+            self.xinput2_pen_motion(event, window_id, &mut callback);
+            // Update cursor position for pen
+            self.with_window(window, |w| {
+                let mut s = w.shared_state_lock();
+                s.cursor_pos = Some(new_cursor_pos);
+            });
+            return;
+        }
 
         let cursor_moved = self.with_window(window, |window| {
             let mut shared_state_lock = window.shared_state_lock();
@@ -1177,6 +1260,136 @@ impl EventProcessor {
         for event in events {
             callback(&self.target, event);
         }
+    }
+
+    /// Emit a `PenEvent` for a pen/stylus motion event.
+    fn xinput2_pen_motion<T: 'static, F>(
+        &self,
+        event: &XIDeviceEvent,
+        window_id: crate::window::WindowId,
+        mut callback: F,
+    ) where
+        F: FnMut(&RootAEL, Event<T>),
+    {
+        let mut devices = self.devices.borrow_mut();
+        let device = match devices.get_mut(
+            &DeviceId(event.sourceid as xinput::DeviceId)
+        ) {
+            Some(d) => d,
+            None => return,
+        };
+
+        let location = PhysicalPosition::new(event.event_x, event.event_y);
+        let pen_id = device.pen_id;
+
+        let phase = if (device.buttons_pressed & (1 << 1)) != 0 {
+            TouchPhase::Moved
+        } else {
+            TouchPhase::Moved
+        };
+
+        let pressure = self.extract_pen_pressure(event, device);
+        let tilt_x = self.extract_pen_tilt_x(event, device);
+        let tilt_y = self.extract_pen_tilt_y(event, device);
+
+        let pen_event = PenEvent {
+            device_id: mkdid(event.deviceid as xinput::DeviceId),
+            phase,
+            location,
+            force: pressure.map(|p| Force::Normalized(p as f64)),
+            tilt_x: tilt_x.map(|v| v as f64),
+            tilt_y: tilt_y.map(|v| v as f64),
+            orientation: None,
+            hover_distance: None,
+            tool_type: Some(if device.is_eraser {
+                PenToolType::Eraser
+            } else {
+                PenToolType::Pen
+            }),
+            button_state: Some(device.buttons_pressed),
+            id: pen_id,
+        };
+
+        let event = Event::WindowEvent {
+            window_id,
+            event: WindowEvent::Pen(pen_event),
+        };
+        callback(&self.target, event);
+    }
+
+    /// Extract pen pressure from valuators, returns Normalized [0, 1].
+    fn extract_pen_pressure(
+        &self,
+        event: &XIDeviceEvent,
+        device: &Device,
+    ) -> Option<f32> {
+        if device.pressure_axis < 0 {
+            return None;
+        }
+        let mask_len = event.valuators.mask_len as usize;
+        let mask = unsafe { slice::from_raw_parts(event.valuators.mask, mask_len) };
+        let mut value = event.valuators.values;
+        for idx in 0..mask_len * 8 {
+            if !xinput2::XIMaskIsSet(mask, idx as i32) {
+                continue;
+            }
+            let x = unsafe { *value };
+            if idx as i32 == device.pressure_axis {
+                return Some(x as f32);
+            }
+            value = unsafe { value.offset(1) };
+        }
+        None
+    }
+
+    /// Extract pen tilt_x from valuators.
+    fn extract_pen_tilt_x(
+        &self,
+        event: &XIDeviceEvent,
+        device: &Device,
+    ) -> Option<f32> {
+        if device.tilt_x_axis < 0 {
+            return None;
+        }
+        let mask_len = event.valuators.mask_len as usize;
+        let mask = unsafe { slice::from_raw_parts(event.valuators.mask, mask_len) };
+        let mut value = event.valuators.values;
+        for idx in 0..mask_len * 8 {
+            if !xinput2::XIMaskIsSet(mask, idx as i32) {
+                continue;
+            }
+            let x = unsafe { *value };
+            if idx as i32 == device.tilt_x_axis {
+                return Some(x as f32);
+            }
+            value = unsafe { value.offset(1) };
+        }
+        None
+    }
+
+    /// Extract pen tilt_y from valuators.
+    fn extract_pen_tilt_y(
+        &self,
+        event: &XIDeviceEvent,
+        device: &Device,
+    ) -> Option<f32> {
+        if device.tilt_y_axis < 0 {
+            return None;
+        }
+        let mask_len = event.valuators.mask_len as usize;
+        let mask = unsafe { slice::from_raw_parts(event.valuators.mask, mask_len) };
+        let mut value = event.valuators.values;
+        for idx in 0..mask_len * 8 {
+            if !xinput2::XIMaskIsSet(mask, idx as i32) {
+                continue;
+            }
+            let x = unsafe { *value };
+            if idx as i32 == device.tilt_y_axis {
+                return Some(x as f32);
+            }
+            value = unsafe { value.offset(1) };
+        }
+        None
     }
 
     fn xinput2_mouse_enter<T: 'static, F>(&self, event: &XIEnterEvent, mut callback: F)
@@ -1535,6 +1748,36 @@ impl EventProcessor {
                 });
                 let mut devices = self.devices.borrow_mut();
                 devices.remove(&DeviceId(info.deviceid as xinput::DeviceId));
+            }
+        }
+    }
+
+    /// Handle `XI_DeviceChanged` — fires when a pen enters or leaves proximity,
+    /// which changes the device's class/valuator info.
+    fn xinput2_device_changed<T: 'static, F>(
+        &mut self,
+        xev: &XIDeviceChangedEvent,
+        _callback: F,
+    ) where
+        F: FnMut(&RootAEL, Event<T>),
+    {
+        let wt = Self::window_target(&self.target);
+        wt.xconn.set_timestamp(xev.time as xproto::Timestamp);
+
+        let device_id = DeviceId(xev.sourceid as xinput::DeviceId);
+
+        // Preserve pen_id across re-init so pointer tracking continuity.
+        let preserved_pen_id = self.devices.borrow().get(&device_id).map(|d| d.pen_id).unwrap_or(0);
+
+        // Re-query the device info to pick up updated valuator classes.
+        if let Some(info) = DeviceInfo::get(&wt.xconn, xev.sourceid) {
+            let mut devices = self.devices.borrow_mut();
+            if let Some(device_info) = info.iter().next() {
+                let mut new_device = Device::new(device_info);
+                if preserved_pen_id > 0 {
+                    new_device.pen_id = preserved_pen_id;
+                }
+                devices.insert(device_id, new_device);
             }
         }
     }

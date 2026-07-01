@@ -63,6 +63,9 @@ const ALL_DEVICES: u16 = 0;
 const ALL_MASTER_DEVICES: u16 = 1;
 const ICONIC_STATE: u32 = 3;
 
+// Pen/stylus class type (XInput 2.4+), not yet in x11-dl.
+const XI_PEN_CLASS: i32 = 10;
+
 /// The underlying x11rb connection that we are using.
 type X11rbConnection = x11rb::xcb_ffi::XCBConnection;
 
@@ -339,9 +342,10 @@ impl<T: 'static> EventLoop<T> {
             .select_xinput_events(
                 root,
                 ALL_DEVICES,
-                x11rb::protocol::xinput::XIEventMask::HIERARCHY,
+                x11rb::protocol::xinput::XIEventMask::HIERARCHY
+                    | x11rb::protocol::xinput::XIEventMask::DEVICE_CHANGED,
             )
-            .expect_then_ignore_error("Failed to register for XInput2 device hotplug events");
+            .expect_then_ignore_error("Failed to register for XInput2 device events");
 
         xconn
             .select_xkb_events(
@@ -978,6 +982,21 @@ pub struct Device {
     // For master devices, this is the paired device (pointer <-> keyboard).
     // For slave devices, this is the master.
     attachment: c_int,
+    // Pen/stylus detection and axis tracking.
+    is_pen: bool,
+    is_eraser: bool,
+    /// Axis number for pressure, or -1 if unknown.
+    pressure_axis: i32,
+    /// Axis number for tilt_x, or -1 if unknown.
+    tilt_x_axis: i32,
+    /// Axis number for tilt_y, or -1 if unknown.
+    tilt_y_axis: i32,
+    /// Axis number for azimuth/orientation, or -1 if unknown.
+    orientation_axis: i32,
+    /// Currently pressed buttons (XInput2 button number bits).
+    buttons_pressed: u32,
+    /// Unique pen pointer ID (0 if not a pen).
+    pen_id: u64,
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -997,28 +1016,95 @@ impl Device {
     fn new(info: &ffi::XIDeviceInfo) -> Self {
         let name = unsafe { CStr::from_ptr(info.name).to_string_lossy() };
         let mut scroll_axes = Vec::new();
+        let mut is_pen = false;
+        let mut is_eraser = false;
+        let mut pressure_axis = -1;
+        let mut tilt_x_axis = -1;
+        let mut tilt_y_axis = -1;
+        let orientation_axis = -1;
 
         if Device::physical_device(info) {
-            // Identify scroll axes
+            // Identify scroll axes and pen axes
             for &class_ptr in Device::classes(info) {
                 let ty = unsafe { (*class_ptr)._type };
-                if ty == ffi::XIScrollClass {
-                    let info = unsafe { &*(class_ptr as *const ffi::XIScrollClassInfo) };
-                    scroll_axes.push((info.number, ScrollAxis {
-                        increment: info.increment,
-                        orientation: match info.scroll_type {
-                            ffi::XIScrollTypeHorizontal => ScrollOrientation::Horizontal,
-                            ffi::XIScrollTypeVertical => ScrollOrientation::Vertical,
-                            _ => unreachable!(),
-                        },
-                        position: 0.0,
-                    }));
+                match ty {
+                    ffi::XIScrollClass => {
+                        let info = unsafe { &*(class_ptr as *const ffi::XIScrollClassInfo) };
+                        scroll_axes.push((info.number, ScrollAxis {
+                            increment: info.increment,
+                            orientation: match info.scroll_type {
+                                ffi::XIScrollTypeHorizontal => ScrollOrientation::Horizontal,
+                                ffi::XIScrollTypeVertical => ScrollOrientation::Vertical,
+                                _ => unreachable!(),
+                            },
+                            position: 0.0,
+                        }));
+                    },
+                    ffi::XIValuatorClass => {
+                        let vc = unsafe { &*(class_ptr as *const ffi::XIValuatorClassInfo) };
+                        // Detect pen by valuator ranges. Pressure typically has min=0, max≈1.
+                        // Tilt axes have a range around [-90, 90] degrees (in raw units).
+                        if info._use == ffi::XISlavePointer {
+                            let name_lower = name.to_lowercase();
+                            // Only check pen axes on devices that look like pens/tablets.
+                            if name_lower.contains("stylus")
+                                || name_lower.contains("pen")
+                                || name_lower.contains("eraser")
+                                || name_lower.contains("wacom")
+                                || name_lower.contains("tablet")
+                            {
+                                if vc.min >= 0.0 && vc.max <= 1.0 && pressure_axis < 0 {
+                                    pressure_axis = vc.number;
+                                    is_pen = true;
+                                }
+                                // Tilt axes typically range -1..1 or -64..64 (degrees)
+                                if vc.number != pressure_axis && vc.number != 0 && vc.number != 1 {
+                                    if tilt_x_axis < 0 {
+                                        tilt_x_axis = vc.number;
+                                    } else if tilt_y_axis < 0 {
+                                        tilt_y_axis = vc.number;
+                                    }
+                                }
+                            }
+                            // Eraser detection
+                            if name_lower.contains("eraser") {
+                                is_eraser = true;
+                                is_pen = true;
+                            }
+                        }
+                    },
+                    ffi::XITouchClass => {
+                        // Touch devices are not pens; if we marked it as pen by accident, clear it.
+                        if name.to_lowercase().contains("touch") {
+                            is_pen = false;
+                            is_eraser = false;
+                        }
+                    },
+                    _ => {},
                 }
             }
         }
 
-        let mut device =
-            Device { _name: name.into_owned(), scroll_axes, attachment: info.attachment };
+        let pen_id = if is_pen {
+            static NEXT_PEN_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+            NEXT_PEN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        } else {
+            0
+        };
+
+        let mut device = Device {
+            _name: name.into_owned(),
+            scroll_axes,
+            attachment: info.attachment,
+            is_pen,
+            is_eraser,
+            pressure_axis,
+            tilt_x_axis,
+            tilt_y_axis,
+            orientation_axis,
+            buttons_pressed: 0,
+            pen_id,
+        };
         device.reset_scroll_position(info);
         device
     }

@@ -21,11 +21,13 @@ use crate::platform_impl::wayland::state::WinitState;
 
 mod keyboard;
 mod pointer;
+mod tablet;
 mod text_input;
 mod touch;
 
 pub use pointer::relative_pointer::RelativePointerState;
 pub use pointer::{PointerConstraintsState, WinitPointerData, WinitPointerDataExt};
+pub use tablet::TabletState;
 pub use text_input::{TextInputState, ZwpTextInputV3Ext};
 
 use keyboard::{KeyboardData, KeyboardState};
@@ -202,10 +204,13 @@ impl SeatHandler for WinitState {
     fn new_seat(
         &mut self,
         _connection: &Connection,
-        _queue_handle: &QueueHandle<Self>,
+        queue_handle: &QueueHandle<Self>,
         seat: WlSeat,
     ) {
         self.seats.insert(seat.id(), WinitSeatState::new());
+        if let Some(ref mut ts) = self.tablet_state {
+            ts.add_seat(&seat, queue_handle);
+        }
     }
 
     fn remove_seat(
@@ -214,6 +219,9 @@ impl SeatHandler for WinitState {
         _queue_handle: &QueueHandle<Self>,
         seat: WlSeat,
     ) {
+        if let Some(ref mut ts) = self.tablet_state {
+            ts.remove_seat(&seat.id());
+        }
         let _ = self.seats.remove(&seat.id());
         self.on_keyboard_destroy(&seat.id());
     }

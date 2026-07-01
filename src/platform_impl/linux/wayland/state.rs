@@ -26,7 +26,7 @@ use sctk::subcompositor::SubcompositorState;
 use crate::platform_impl::wayland::event_loop::sink::EventSink;
 use crate::platform_impl::wayland::output::MonitorHandle;
 use crate::platform_impl::wayland::seat::{
-    PointerConstraintsState, RelativePointerState, TextInputState, WinitPointerData,
+    PointerConstraintsState, RelativePointerState, TabletState, TextInputState, WinitPointerData,
     WinitPointerDataExt, WinitSeatState,
 };
 use crate::platform_impl::wayland::types::kwin_blur::KWinBlurManager;
@@ -115,6 +115,9 @@ pub struct WinitState {
     /// Whether we have dispatched events to the user thus we want to
     /// send `AboutToWait` and normally wakeup the user.
     pub dispatched_events: bool,
+
+    /// Tablet (pen/stylus) protocol state.
+    pub tablet_state: Option<TabletState>,
 }
 
 impl WinitState {
@@ -143,9 +146,14 @@ impl WinitState {
 
         let seat_state = SeatState::new(globals, queue_handle);
 
+        let mut tablet_state = TabletState::new(globals, queue_handle).ok();
+
         let mut seats = AHashMap::default();
         for seat in seat_state.seats() {
             seats.insert(seat.id(), WinitSeatState::new());
+            if let Some(ref mut ts) = tablet_state {
+                ts.add_seat(&seat, queue_handle);
+            }
         }
 
         let (viewporter_state, fractional_scaling_manager) =
@@ -185,6 +193,7 @@ impl WinitState {
             pointer_constraints: PointerConstraintsState::new(globals, queue_handle)
                 .map(Arc::new)
                 .ok(),
+            tablet_state,
             pointer_surfaces: Default::default(),
 
             monitors: Arc::new(Mutex::new(monitors)),
