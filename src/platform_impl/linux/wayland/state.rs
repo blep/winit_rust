@@ -33,6 +33,7 @@ use crate::platform_impl::wayland::types::kwin_blur::KWinBlurManager;
 use crate::platform_impl::wayland::types::wp_fractional_scaling::FractionalScalingManager;
 use crate::platform_impl::wayland::types::wp_viewporter::ViewporterState;
 use crate::platform_impl::wayland::types::xdg_activation::XdgActivationState;
+use crate::platform_impl::wayland::types::xdg_toplevel_icon::XdgToplevelIconManager;
 use crate::platform_impl::wayland::window::{WindowRequests, WindowState};
 use crate::platform_impl::wayland::{WaylandError, WindowId};
 use crate::platform_impl::OsError;
@@ -109,6 +110,12 @@ pub struct WinitState {
     /// KWin blur manager.
     pub kwin_blur_manager: Option<KWinBlurManager>,
 
+    /// The `xdg_toplevel_icon_manager_v1` global, if the compositor supports it.
+    pub xdg_toplevel_icon_manager: Option<XdgToplevelIconManager>,
+
+    /// A shared pool where to allocate toplevel icon buffers.
+    pub toplevel_icon_pool: Arc<Mutex<SlotPool>>,
+
     /// Loop handle to re-register event sources, such as keyboard repeat.
     pub loop_handle: LoopHandle<'static, Self>,
 
@@ -157,6 +164,7 @@ impl WinitState {
 
         let shm = Shm::bind(globals, queue_handle).map_err(WaylandError::Bind)?;
         let custom_cursor_pool = Arc::new(Mutex::new(SlotPool::new(2, &shm).unwrap()));
+        let toplevel_icon_pool = Arc::new(Mutex::new(SlotPool::new(4, &shm).unwrap()));
 
         Ok(Self {
             registry_state,
@@ -177,6 +185,8 @@ impl WinitState {
             viewporter_state,
             fractional_scaling_manager,
             kwin_blur_manager: KWinBlurManager::new(globals, queue_handle).ok(),
+            xdg_toplevel_icon_manager: XdgToplevelIconManager::new(globals, queue_handle).ok(),
+            toplevel_icon_pool,
 
             seats,
             text_input_state: TextInputState::new(globals, queue_handle).ok(),

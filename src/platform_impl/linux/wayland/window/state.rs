@@ -36,7 +36,8 @@ use crate::error::{ExternalError, NotSupportedError};
 use crate::platform_impl::wayland::logical_to_physical_rounded;
 use crate::platform_impl::wayland::types::cursor::{CustomCursor, SelectedCursor};
 use crate::platform_impl::wayland::types::kwin_blur::KWinBlurManager;
-use crate::platform_impl::{PlatformCustomCursor, WindowId};
+use crate::platform_impl::wayland::types::xdg_toplevel_icon::{ToplevelIcon, XdgToplevelIconManager};
+use crate::platform_impl::{PlatformCustomCursor, PlatformIcon, WindowId};
 use crate::window::{CursorGrabMode, CursorIcon, ImePurpose, ResizeDirection, Theme};
 
 use crate::platform_impl::wayland::seat::{
@@ -146,6 +147,13 @@ pub struct WindowState {
     blur: Option<OrgKdeKwinBlur>,
     blur_manager: Option<KWinBlurManager>,
 
+    /// The `xdg_toplevel_icon_manager_v1`, if the compositor supports it.
+    icon_manager: Option<XdgToplevelIconManager>,
+    /// A shared pool where to allocate toplevel icon buffers.
+    icon_pool: Arc<Mutex<SlotPool>>,
+    /// The currently set toplevel icon (if any); kept alive to protect its buffer.
+    current_icon: Option<ToplevelIcon>,
+
     /// Whether the client side decorations have pending move operations.
     ///
     /// The value is the serial of the event triggered moved.
@@ -186,6 +194,9 @@ impl WindowState {
         Self {
             blur: None,
             blur_manager: winit_state.kwin_blur_manager.clone(),
+            icon_manager: winit_state.xdg_toplevel_icon_manager.clone(),
+            icon_pool: winit_state.toplevel_icon_pool.clone(),
+            current_icon: None,
             compositor,
             connection,
             csd_fails: false,
@@ -1115,6 +1126,36 @@ impl WindowState {
 
         self.window.set_title(&title);
         self.title = title;
+    }
+
+    /// Set the toplevel icon, or clear it when given `None`.
+    ///
+    /// A no-op when the compositor does not support `xdg-toplevel-icon-v1`.
+    pub(crate) fn set_toplevel_icon(&mut self, window_icon: Option<PlatformIcon>) {
+        let Some(icon_manager) = self.icon_manager.as_ref() else {
+            return;
+        };
+
+        match window_icon {
+            Some(icon) => {
+                let scale = self.scale_factor.max(1.).round() as i32;
+                let mut pool = self.icon_pool.lock().unwrap();
+                let new_icon = icon_manager.set_icon(
+                    self.window.xdg_toplevel(),
+                    &mut pool,
+                    &self.queue_handle,
+                    &icon,
+                    scale,
+                );
+                if let Some(new_icon) = new_icon {
+                    self.current_icon = Some(new_icon);
+                }
+            },
+            None => {
+                icon_manager.clear_icon(self.window.xdg_toplevel());
+                self.current_icon = None;
+            },
+        }
     }
 
     /// Mark the window as transparent.

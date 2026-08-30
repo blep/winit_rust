@@ -430,7 +430,9 @@ impl Window {
     pub fn set_window_level(&self, _level: WindowLevel) {}
 
     #[inline]
-    pub(crate) fn set_window_icon(&self, _window_icon: Option<PlatformIcon>) {}
+    pub(crate) fn set_window_icon(&self, window_icon: Option<PlatformIcon>) {
+        self.window_state.lock().unwrap().set_toplevel_icon(window_icon);
+    }
 
     #[inline]
     pub fn set_minimized(&self, minimized: bool) {
